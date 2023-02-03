@@ -29,12 +29,12 @@ import (
 	"strings"
 
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
+	"github.com/aws/amazon-ecs-agent/agent/utils/httpproxy"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 
 	"github.com/pkg/errors"
-	"golang.org/x/net/http/httpproxy"
 )
 
 func DefaultIfBlank(str string, default_value string) string {
@@ -161,6 +161,11 @@ func ParseBool(str string, default_ bool) bool {
 		return default_
 	}
 	return res
+}
+
+// Removes element at a particular index in the slice
+func Remove(slice []string, s int) []string {
+	return append(slice[:s], slice[s+1:]...)
 }
 
 // IsAWSErrorCodeEqual returns true if the err implements Error

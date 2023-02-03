@@ -140,6 +140,7 @@ func TestCapabilities(t *testing.T) {
 		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix,
 		attributePrefix + capabilityExec,
 		attributePrefix + capabilityServiceConnect,
+		attributePrefix + capabilityContainerPortRange,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -1239,6 +1240,7 @@ func TestCapabilitiesNoServiceConnect(t *testing.T) {
 		attributePrefix + capabilityEnvFilesS3,
 		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix,
 		attributePrefix + capabilityExec,
+		attributePrefix + capabilityContainerPortRange,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -1415,4 +1417,30 @@ func TestAppendAndRemoveAttributes(t *testing.T) {
 	assert.Contains(t, attrs, &ecs.Attribute{
 		Name: aws.String("cap-2"),
 	})
+}
+
+func TestAppendGMSACapabilities(t *testing.T) {
+	var inputCapabilities []*ecs.Attribute
+	var expectedCapabilities []*ecs.Attribute
+
+	expectedCapabilities = append(expectedCapabilities,
+		[]*ecs.Attribute{
+			{
+				Name: aws.String(attributePrefix + capabilityGMSA),
+			},
+		}...)
+
+	agent := &ecsAgent{
+		cfg: &config.Config{
+			GMSACapable: true,
+		},
+	}
+
+	capabilities := agent.appendGMSACapabilities(inputCapabilities)
+
+	assert.Equal(t, len(expectedCapabilities), len(capabilities))
+	for i, expected := range expectedCapabilities {
+		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
+		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
+	}
 }

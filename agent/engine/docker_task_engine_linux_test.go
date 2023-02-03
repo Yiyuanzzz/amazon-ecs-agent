@@ -45,9 +45,12 @@ import (
 	mock_dockerstate "github.com/aws/amazon-ecs-agent/agent/engine/dockerstate/mocks"
 	mock_serviceconnect "github.com/aws/amazon-ecs-agent/agent/engine/serviceconnect/mock"
 	"github.com/aws/amazon-ecs-agent/agent/engine/testdata"
+	mock_s3_factory "github.com/aws/amazon-ecs-agent/agent/s3/factory/mocks"
+	mock_ssm_factory "github.com/aws/amazon-ecs-agent/agent/ssm/factory/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/cgroup/control/mock_control"
+	"github.com/aws/amazon-ecs-agent/agent/taskresource/credentialspec"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/firelens"
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/ssmsecret"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
@@ -94,8 +97,10 @@ func TestResourceContainerProgression(t *testing.T) {
 	mockControl := mock_control.NewMockControl(ctrl)
 	mockIO := mock_ioutilwrapper.NewMockIOUtil(ctrl)
 	taskID := sleepTask.GetID()
-	cgroupMemoryPath := fmt.Sprintf("/sys/fs/cgroup/memory/ecs/%s/memory.use_hierarchy", taskID)
 	cgroupRoot := fmt.Sprintf("/ecs/%s", taskID)
+	if config.CgroupV2 {
+		cgroupRoot = fmt.Sprintf("ecstasks-%s.slice", taskID)
+	}
 	cgroupResource := cgroup.NewCgroupResource(sleepTask.Arn, mockControl, mockIO, cgroupRoot, cgroupMountPath, specs.LinuxResources{})
 
 	sleepTask.ResourcesMapUnsafe = make(map[string][]taskresource.TaskResource)
@@ -107,35 +112,69 @@ func TestResourceContainerProgression(t *testing.T) {
 	containerEventsWG := sync.WaitGroup{}
 	client.EXPECT().ContainerEvents(gomock.Any()).Return(eventStream, nil)
 	serviceConnectManager.EXPECT().GetAppnetContainerTarballDir().AnyTimes()
-	gomock.InOrder(
-		// Ensure that the resource is created first
-		mockControl.EXPECT().Exists(gomock.Any()).Return(false),
-		mockControl.EXPECT().Create(gomock.Any()).Return(nil),
-		mockIO.EXPECT().WriteFile(cgroupMemoryPath, gomock.Any(), gomock.Any()).Return(nil),
-		imageManager.EXPECT().AddAllImageStates(gomock.Any()).AnyTimes(),
-		client.EXPECT().PullImage(gomock.Any(), sleepContainer.Image, nil, gomock.Any()).Return(dockerapi.DockerContainerMetadata{}),
-		imageManager.EXPECT().RecordContainerReference(sleepContainer).Return(nil),
-		imageManager.EXPECT().GetImageStateFromImageName(sleepContainer.Image).Return(nil, false),
-		client.EXPECT().APIVersion().Return(defaultDockerClientAPIVersion, nil),
-		client.EXPECT().CreateContainer(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Do(
-			func(ctx interface{}, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, containerName string, z time.Duration) {
-				assert.True(t, strings.Contains(containerName, sleepContainer.Name))
-				containerEventsWG.Add(1)
-				go func() {
-					eventStream <- createDockerEvent(apicontainerstatus.ContainerCreated)
-					containerEventsWG.Done()
-				}()
-			}).Return(dockerapi.DockerContainerMetadata{DockerID: containerID + ":" + sleepContainer.Name}),
-		// Next, the sleep container is started
-		client.EXPECT().StartContainer(gomock.Any(), containerID+":"+sleepContainer.Name, defaultConfig.ContainerStartTimeout).Do(
-			func(ctx interface{}, id string, timeout time.Duration) {
-				containerEventsWG.Add(1)
-				go func() {
-					eventStream <- createDockerEvent(apicontainerstatus.ContainerRunning)
-					containerEventsWG.Done()
-				}()
-			}).Return(dockerapi.DockerContainerMetadata{DockerID: containerID + ":" + sleepContainer.Name}),
-	)
+
+	// Hierarchical memory accounting is always enabled in CgroupV2 and no controller file exists to configure it
+	if config.CgroupV2 {
+		gomock.InOrder(
+			// Ensure that the resource is created first
+			mockControl.EXPECT().Exists(gomock.Any()).Return(false),
+			mockControl.EXPECT().Create(gomock.Any()).Return(nil),
+			imageManager.EXPECT().AddAllImageStates(gomock.Any()).AnyTimes(),
+			client.EXPECT().PullImage(gomock.Any(), sleepContainer.Image, nil, gomock.Any()).Return(dockerapi.DockerContainerMetadata{}),
+			imageManager.EXPECT().RecordContainerReference(sleepContainer).Return(nil),
+			imageManager.EXPECT().GetImageStateFromImageName(sleepContainer.Image).Return(nil, false),
+			client.EXPECT().APIVersion().Return(defaultDockerClientAPIVersion, nil),
+			client.EXPECT().CreateContainer(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Do(
+				func(ctx interface{}, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, containerName string, z time.Duration) {
+					assert.True(t, strings.Contains(containerName, sleepContainer.Name))
+					containerEventsWG.Add(1)
+					go func() {
+						eventStream <- createDockerEvent(apicontainerstatus.ContainerCreated)
+						containerEventsWG.Done()
+					}()
+				}).Return(dockerapi.DockerContainerMetadata{DockerID: containerID + ":" + sleepContainer.Name}),
+			// Next, the sleep container is started
+			client.EXPECT().StartContainer(gomock.Any(), containerID+":"+sleepContainer.Name, defaultConfig.ContainerStartTimeout).Do(
+				func(ctx interface{}, id string, timeout time.Duration) {
+					containerEventsWG.Add(1)
+					go func() {
+						eventStream <- createDockerEvent(apicontainerstatus.ContainerRunning)
+						containerEventsWG.Done()
+					}()
+				}).Return(dockerapi.DockerContainerMetadata{DockerID: containerID + ":" + sleepContainer.Name}),
+		)
+	} else {
+		cgroupMemoryPath := fmt.Sprintf("/sys/fs/cgroup/memory/ecs/%s/memory.use_hierarchy", taskID)
+		gomock.InOrder(
+			// Ensure that the resource is created first
+			mockControl.EXPECT().Exists(gomock.Any()).Return(false),
+			mockControl.EXPECT().Create(gomock.Any()).Return(nil),
+			mockIO.EXPECT().WriteFile(cgroupMemoryPath, gomock.Any(), gomock.Any()).Return(nil),
+			imageManager.EXPECT().AddAllImageStates(gomock.Any()).AnyTimes(),
+			client.EXPECT().PullImage(gomock.Any(), sleepContainer.Image, nil, gomock.Any()).Return(dockerapi.DockerContainerMetadata{}),
+			imageManager.EXPECT().RecordContainerReference(sleepContainer).Return(nil),
+			imageManager.EXPECT().GetImageStateFromImageName(sleepContainer.Image).Return(nil, false),
+			client.EXPECT().APIVersion().Return(defaultDockerClientAPIVersion, nil),
+			client.EXPECT().CreateContainer(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Do(
+				func(ctx interface{}, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, containerName string, z time.Duration) {
+					assert.True(t, strings.Contains(containerName, sleepContainer.Name))
+					containerEventsWG.Add(1)
+					go func() {
+						eventStream <- createDockerEvent(apicontainerstatus.ContainerCreated)
+						containerEventsWG.Done()
+					}()
+				}).Return(dockerapi.DockerContainerMetadata{DockerID: containerID + ":" + sleepContainer.Name}),
+			// Next, the sleep container is started
+			client.EXPECT().StartContainer(gomock.Any(), containerID+":"+sleepContainer.Name, defaultConfig.ContainerStartTimeout).Do(
+				func(ctx interface{}, id string, timeout time.Duration) {
+					containerEventsWG.Add(1)
+					go func() {
+						eventStream <- createDockerEvent(apicontainerstatus.ContainerRunning)
+						containerEventsWG.Done()
+					}()
+				}).Return(dockerapi.DockerContainerMetadata{DockerID: containerID + ":" + sleepContainer.Name}),
+		)
+	}
 	addTaskToEngine(t, ctx, taskEngine, sleepTask, mockTime, &containerEventsWG)
 
 	cleanup := make(chan time.Time, 1)
@@ -263,6 +302,9 @@ func TestResourceContainerProgressionFailure(t *testing.T) {
 	mockControl := mock_control.NewMockControl(ctrl)
 	taskID := sleepTask.GetID()
 	cgroupRoot := fmt.Sprintf("/ecs/%s", taskID)
+	if config.CgroupV2 {
+		cgroupRoot = fmt.Sprintf("ecstasks-%s.slice", taskID)
+	}
 	cgroupResource := cgroup.NewCgroupResource(sleepTask.Arn, mockControl, nil, cgroupRoot, cgroupMountPath, specs.LinuxResources{})
 
 	sleepTask.ResourcesMapUnsafe = make(map[string][]taskresource.TaskResource)
@@ -340,7 +382,6 @@ func TestTaskCPULimitHappyPath(t *testing.T) {
 			mockControl := mock_control.NewMockControl(ctrl)
 			mockIO := mock_ioutilwrapper.NewMockIOUtil(ctrl)
 			taskID := sleepTask.GetID()
-			cgroupMemoryPath := fmt.Sprintf("/sys/fs/cgroup/memory/ecs/%s/memory.use_hierarchy", taskID)
 			if tc.taskCPULimit.Enabled() {
 				// TODO Currently, the resource Setup() method gets invoked multiple
 				// times for a task. This is really a bug and a fortunate occurrence
@@ -357,7 +398,10 @@ func TestTaskCPULimitHappyPath(t *testing.T) {
 				}
 				mockControl.EXPECT().Exists(gomock.Any()).Return(false)
 				mockControl.EXPECT().Create(gomock.Any()).Return(nil)
-				mockIO.EXPECT().WriteFile(cgroupMemoryPath, gomock.Any(), gomock.Any()).Return(nil)
+				if !config.CgroupV2 {
+					cgroupMemoryPath := fmt.Sprintf("/sys/fs/cgroup/memory/ecs/%s/memory.use_hierarchy", taskID)
+					mockIO.EXPECT().WriteFile(cgroupMemoryPath, gomock.Any(), gomock.Any()).Return(nil)
+				}
 			}
 
 			for _, container := range sleepTask.Containers {
@@ -409,6 +453,9 @@ func TestTaskCPULimitHappyPath(t *testing.T) {
 			taskEngine.AddTask(sleepTaskStop)
 			taskEngine.AddTask(sleepTaskStop)
 			cgroupRoot := fmt.Sprintf("/ecs/%s", taskID)
+			if config.CgroupV2 {
+				cgroupRoot = fmt.Sprintf("ecstasks-%s.slice", taskID)
+			}
 			if tc.taskCPULimit.Enabled() {
 				mockControl.EXPECT().Remove(cgroupRoot).Return(nil)
 			}
@@ -1391,4 +1438,83 @@ func TestWatchAppNetImage(t *testing.T) {
 	assert.NoError(t, err)
 
 	<-watcherCtx.Done()
+}
+
+func TestCredentialSpecResourceTaskFile(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	ctrl, client, mockTime, taskEngine, credentialsManager, _, _, _ := mocks(t, ctx, &defaultConfig)
+	defer ctrl.Finish()
+
+	// metadata required for createContainer workflow validation
+	credentialSpecTaskARN := "credentialSpecTask"
+	credentialSpecTaskFamily := "credentialSpecFamily"
+	credentialSpecTaskVersion := "1"
+	credentialSpecTaskContainerName := "credentialSpecContainer"
+
+	c := &apicontainer.Container{
+		Name: credentialSpecTaskContainerName,
+	}
+	credentialspecFile := "credentialspec:arn:aws:s3:::gmsacredspec/contoso_webapp01.json"
+	targetCredentialspecFile := "/var/credentials-fetcher/krbdir/123456/webap01"
+	hostConfig := "{\"SecurityOpt\": [\"credentialspec:arn:aws:s3:::gmsacredspec/contoso_webapp01.json\"]}"
+	c.DockerConfig.HostConfig = &hostConfig
+
+	// sample test
+	testTask := &apitask.Task{
+		Arn:        credentialSpecTaskARN,
+		Family:     credentialSpecTaskFamily,
+		Version:    credentialSpecTaskVersion,
+		Containers: []*apicontainer.Container{c},
+	}
+
+	// metadata required for execution role authentication workflow
+	credentialsID := "execution role"
+
+	// configure the task and container to use execution role
+	testTask.SetExecutionRoleCredentialsID(credentialsID)
+
+	// validate base config
+	expectedConfig, err := testTask.DockerConfig(testTask.Containers[0], defaultDockerClientAPIVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expectedConfig.Labels = map[string]string{
+		"com.amazonaws.ecs.task-arn":                credentialSpecTaskARN,
+		"com.amazonaws.ecs.container-name":          credentialSpecTaskContainerName,
+		"com.amazonaws.ecs.task-definition-family":  credentialSpecTaskFamily,
+		"com.amazonaws.ecs.task-definition-version": credentialSpecTaskVersion,
+		"com.amazonaws.ecs.cluster":                 "",
+	}
+
+	ssmClientCreator := mock_ssm_factory.NewMockSSMClientCreator(ctrl)
+	s3ClientCreator := mock_s3_factory.NewMockS3ClientCreator(ctrl)
+
+	credentialSpecRes, cerr := credentialspec.NewCredentialSpecResource(
+		testTask.Arn,
+		defaultConfig.AWSRegion,
+		credentialsID,
+		credentialsManager,
+		ssmClientCreator,
+		s3ClientCreator,
+		nil)
+	assert.NoError(t, cerr)
+
+	credSpecdata := map[string]string{
+		credentialspecFile: targetCredentialspecFile,
+	}
+	credentialSpecRes.CredSpecMap = credSpecdata
+
+	testTask.ResourcesMapUnsafe = map[string][]taskresource.TaskResource{
+		credentialspec.ResourceName: {credentialSpecRes},
+	}
+
+	mockTime.EXPECT().Now().AnyTimes()
+	client.EXPECT().APIVersion().Return(defaultDockerClientAPIVersion, nil).AnyTimes()
+
+	client.EXPECT().CreateContainer(gomock.Any(), expectedConfig, gomock.Any(), gomock.Any(), gomock.Any())
+
+	ret := taskEngine.(*DockerTaskEngine).createContainer(testTask, testTask.Containers[0])
+	assert.Nil(t, ret.Error)
 }

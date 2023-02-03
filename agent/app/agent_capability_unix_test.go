@@ -504,6 +504,7 @@ func TestPIDAndIPCNamespaceSharingCapabilitiesUnix(t *testing.T) {
 		attributePrefix + capabilityFullTaskSync,
 		attributePrefix + capabilityEnvFilesS3,
 		attributePrefix + capabiltyPIDAndIPCNamespaceSharing,
+		attributePrefix + capabilityContainerPortRange,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -648,6 +649,7 @@ func TestAppMeshCapabilitiesUnix(t *testing.T) {
 		attributePrefix + capabilityEnvFilesS3,
 		attributePrefix + capabiltyPIDAndIPCNamespaceSharing,
 		attributePrefix + appMeshAttributeSuffix,
+		attributePrefix + capabilityContainerPortRange,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -836,6 +838,7 @@ func TestCapabilitiesUnix(t *testing.T) {
 		capabilityPrefix + capabilityFirelensLoggingDriver,
 		attributePrefix + capabilityFirelensLoggingDriver + capabilityFireLensLoggingDriverConfigBufferLimitSuffix,
 		attributePrefix + capabilityEnvFilesS3,
+		attributePrefix + capabilityContainerPortRange,
 	}
 
 	var expectedCapabilities []*ecs.Attribute
@@ -911,16 +914,6 @@ func TestFirelensConfigCapabilitiesUnix(t *testing.T) {
 
 	assert.Contains(t, capabilities, &ecs.Attribute{Name: aws.String(attributePrefix + capabilityFirelensConfigFile)})
 	assert.Contains(t, capabilities, &ecs.Attribute{Name: aws.String(attributePrefix + capabilityFirelensConfigS3)})
-}
-
-func TestAppendGMSACapabilities(t *testing.T) {
-	var inputCapabilities []*ecs.Attribute
-
-	agent := &ecsAgent{}
-
-	capabilities := agent.appendGMSACapabilities(inputCapabilities)
-	assert.Equal(t, len(inputCapabilities), len(capabilities))
-	assert.EqualValues(t, capabilities, inputCapabilities)
 }
 
 func TestAppendFSxWindowsFileServerCapabilities(t *testing.T) {

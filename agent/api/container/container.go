@@ -15,8 +15,10 @@ package container
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -317,6 +319,13 @@ type Container struct {
 	finishedAt time.Time
 
 	labels map[string]string
+
+	// ContainerHasPortRange is set to true when the container has at least 1 port range requested.
+	ContainerHasPortRange bool
+	// ContainerPortSet is a set of singular container ports that don't belong to a containerPortRange request
+	ContainerPortSet map[int]struct{}
+	// ContainerPortRangeMap is a map of containerPortRange to its associated hostPortRange
+	ContainerPortRangeMap map[string]string
 }
 
 type DependsOn struct {
@@ -1325,6 +1334,44 @@ func (c *Container) UpdateManagedAgentSentStatus(agentName string, status apicon
 	return false
 }
 
+// RequiresCredentialSpec checks if container needs a credentialspec resource
+func (c *Container) RequiresCredentialSpec() bool {
+	credSpec, err := c.getCredentialSpec()
+	if err != nil || credSpec == "" {
+		return false
+	}
+
+	return true
+}
+
+// GetCredentialSpec is used to retrieve the current credentialspec resource
+func (c *Container) GetCredentialSpec() (string, error) {
+	return c.getCredentialSpec()
+}
+
+func (c *Container) getCredentialSpec() (string, error) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+
+	if c.DockerConfig.HostConfig == nil {
+		return "", errors.New("empty container hostConfig")
+	}
+
+	hostConfig := &dockercontainer.HostConfig{}
+	err := json.Unmarshal([]byte(*c.DockerConfig.HostConfig), hostConfig)
+	if err != nil || len(hostConfig.SecurityOpt) == 0 {
+		return "", errors.New("unable to obtain security options from container hostConfig")
+	}
+
+	for _, opt := range hostConfig.SecurityOpt {
+		if strings.HasPrefix(opt, "credentialspec") {
+			return opt, nil
+		}
+	}
+
+	return "", errors.New("unable to obtain credentialspec")
+}
+
 func (c *Container) GetManagedAgentStatus(agentName string) apicontainerstatus.ManagedAgentStatus {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -1359,4 +1406,40 @@ func (c *Container) IsContainerTornDown() bool {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 	return c.ContainerTornDownUnsafe
+}
+
+func (c *Container) SetContainerHasPortRange(containerHasPortRange bool) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ContainerHasPortRange = containerHasPortRange
+}
+
+func (c *Container) HasPortRange() bool {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.ContainerHasPortRange
+}
+
+func (c *Container) SetContainerPortSet(containerPortSet map[int]struct{}) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ContainerPortSet = containerPortSet
+}
+
+func (c *Container) GetContainerPortSet() map[int]struct{} {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.ContainerPortSet
+}
+
+func (c *Container) SetContainerPortRangeMap(portRangeMap map[string]string) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	c.ContainerPortRangeMap = portRangeMap
+}
+
+func (c *Container) GetContainerPortRangeMap() map[string]string {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.ContainerPortRangeMap
 }

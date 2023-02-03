@@ -186,7 +186,9 @@ func TestSupportedCapabilitiesWindows(t *testing.T) {
 		attributePrefix + capabilityContainerOrdering,
 		attributePrefix + capabilityFullTaskSync,
 		attributePrefix + capabilityEnvFilesS3,
-		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix}
+		attributePrefix + taskENIBlockInstanceMetadataAttributeSuffix,
+		attributePrefix + capabilityContainerPortRange,
+	}
 
 	var expectedCapabilities []*ecs.Attribute
 	for _, name := range expectedCapabilityNames {
@@ -222,32 +224,6 @@ func TestSupportedCapabilitiesWindows(t *testing.T) {
 			Name:  expected.Name,
 			Value: expected.Value,
 		})
-	}
-}
-
-func TestAppendGMSACapabilities(t *testing.T) {
-	var inputCapabilities []*ecs.Attribute
-	var expectedCapabilities []*ecs.Attribute
-
-	expectedCapabilities = append(expectedCapabilities,
-		[]*ecs.Attribute{
-			{
-				Name: aws.String(attributePrefix + capabilityGMSA),
-			},
-		}...)
-
-	agent := &ecsAgent{
-		cfg: &config.Config{
-			GMSACapable: true,
-		},
-	}
-
-	capabilities := agent.appendGMSACapabilities(inputCapabilities)
-
-	assert.Equal(t, len(expectedCapabilities), len(capabilities))
-	for i, expected := range expectedCapabilities {
-		assert.Equal(t, aws.StringValue(expected.Name), aws.StringValue(capabilities[i].Name))
-		assert.Equal(t, aws.StringValue(expected.Value), aws.StringValue(capabilities[i].Value))
 	}
 }
 
