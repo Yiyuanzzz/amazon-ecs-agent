@@ -27,16 +27,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/amazon-ecs-agent/agent/api/appmesh"
 	apicontainer "github.com/aws/amazon-ecs-agent/agent/api/container"
-	apicontainerstatus "github.com/aws/amazon-ecs-agent/agent/api/container/status"
-	apieni "github.com/aws/amazon-ecs-agent/agent/api/eni"
-	mock_api "github.com/aws/amazon-ecs-agent/agent/api/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/api/serviceconnect"
 	apitask "github.com/aws/amazon-ecs-agent/agent/api/task"
-	apitaskstatus "github.com/aws/amazon-ecs-agent/agent/api/task/status"
+	mock_asm_factory "github.com/aws/amazon-ecs-agent/agent/asm/factory/mocks"
 	"github.com/aws/amazon-ecs-agent/agent/config"
-	"github.com/aws/amazon-ecs-agent/agent/credentials"
 	"github.com/aws/amazon-ecs-agent/agent/data"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi"
 	mock_dockerapi "github.com/aws/amazon-ecs-agent/agent/dockerclient/dockerapi/mocks"
@@ -55,14 +50,21 @@ import (
 	"github.com/aws/amazon-ecs-agent/agent/taskresource/ssmsecret"
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 	mock_ioutilwrapper "github.com/aws/amazon-ecs-agent/agent/utils/ioutilwrapper/mocks"
+	mock_appnet "github.com/aws/amazon-ecs-agent/ecs-agent/api/appnet/mocks"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/api/attachment"
+	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
+	apitaskstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/credentials"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/netlib/model/appmesh"
+	ni "github.com/aws/amazon-ecs-agent/ecs-agent/netlib/model/networkinterface"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/containernetworking/cni/pkg/types/current"
+	cniTypesCurrent "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/docker/docker/api/types"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/golang/mock/gomock"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -195,14 +197,13 @@ func TestDeleteTask(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	dataClient, cleanup := newTestDataClient(t)
-	defer cleanup()
+	dataClient := newTestDataClient(t)
 
 	mockControl := mock_control.NewMockControl(ctrl)
 	cgroupResource := cgroup.NewCgroupResource("", mockControl, nil, "cgroupRoot", "", specs.LinuxResources{})
 	task := &apitask.Task{
 		Arn: testTaskARN,
-		ENIs: []*apieni.ENI{
+		ENIs: []*ni.NetworkInterface{
 			{
 				MacAddress: mac,
 			},
@@ -222,12 +223,14 @@ func TestDeleteTask(t *testing.T) {
 		cfg:        &cfg,
 	}
 
-	attachment := &apieni.ENIAttachment{
-		TaskARN:          "TaskARN",
-		AttachmentARN:    testAttachmentArn,
-		MACAddress:       "MACAddress",
-		Status:           apieni.ENIAttachmentNone,
-		AttachStatusSent: true,
+	attachment := &ni.ENIAttachment{
+		AttachmentInfo: attachment.AttachmentInfo{
+			TaskARN:          "TaskARN",
+			AttachmentARN:    testAttachmentArn,
+			Status:           attachment.AttachmentNone,
+			AttachStatusSent: true,
+		},
+		MACAddress: "MACAddress",
 	}
 
 	gomock.InOrder(
@@ -259,10 +262,10 @@ func TestDeleteTaskBranchENIEnabled(t *testing.T) {
 	cgroupResource := cgroup.NewCgroupResource("", mockControl, nil, "cgroupRoot", "", specs.LinuxResources{})
 	task := &apitask.Task{
 		Arn: testTaskARN,
-		ENIs: []*apieni.ENI{
+		ENIs: []*ni.NetworkInterface{
 			{
 				MacAddress:                   mac,
-				InterfaceAssociationProtocol: apieni.VLANInterfaceAssociationProtocol,
+				InterfaceAssociationProtocol: ni.VLANInterfaceAssociationProtocol,
 			},
 		},
 	}
@@ -985,7 +988,7 @@ func TestContainersWithServiceConnect(t *testing.T) {
 	defer ctrl.Finish()
 
 	cniClient := mock_ecscni.NewMockCNIClient(ctrl)
-	appnetClient := mock_api.NewMockAppnetClient(ctrl)
+	appnetClient := mock_appnet.NewMockAppNetClient(ctrl)
 	taskEngine.(*DockerTaskEngine).cniClient = cniClient
 	taskEngine.(*DockerTaskEngine).appnetClient = appnetClient
 	taskEngine.(*DockerTaskEngine).taskSteadyStatePollInterval = taskSteadyStatePollInterval
@@ -1087,7 +1090,7 @@ func TestContainersWithServiceConnect(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	gomock.InOrder(
-		appnetClient.EXPECT().DrainInboundConnections(gomock.Any()).MaxTimes(1),
+		appnetClient.EXPECT().DrainInboundConnections(gomock.Any(), gomock.Any()).MaxTimes(1),
 		secondStop,
 		scStop,
 		cniClient.EXPECT().CleanupNS(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil),
@@ -1239,7 +1242,7 @@ func TestContainersWithServiceConnect_BridgeMode(t *testing.T) {
 	)
 
 	cniClient.EXPECT().SetupNS(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, cfg *ecscni.Config, timeout time.Duration) (*current.Result, error) {
+		func(ctx context.Context, cfg *ecscni.Config, timeout time.Duration) (*cniTypesCurrent.Result, error) {
 			assert.Equal(t, 1, len(cfg.NetworkConfigs))
 			var scNetworkConfig ecscni.ServiceConnectConfig
 			err := json.Unmarshal(cfg.NetworkConfigs[0].CNINetworkConfig.Bytes, &scNetworkConfig)
@@ -1407,7 +1410,7 @@ func TestProvisionContainerResourcesBridgeModeWithServiceConnect(t *testing.T) {
 				},
 			}, nil),
 			mockCNIClient.EXPECT().SetupNS(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
-				func(ctx context.Context, cfg *ecscni.Config, timeout time.Duration) (*current.Result, error) {
+				func(ctx context.Context, cfg *ecscni.Config, timeout time.Duration) (*cniTypesCurrent.Result, error) {
 					assert.Equal(t, 1, len(cfg.NetworkConfigs))
 					var scNetworkConfig ecscni.ServiceConnectConfig
 					err := json.Unmarshal(cfg.NetworkConfigs[0].CNINetworkConfig.Bytes, &scNetworkConfig)
@@ -1490,6 +1493,7 @@ func TestCredentialSpecResourceTaskFile(t *testing.T) {
 
 	ssmClientCreator := mock_ssm_factory.NewMockSSMClientCreator(ctrl)
 	s3ClientCreator := mock_s3_factory.NewMockS3ClientCreator(ctrl)
+	asmClientCreator := mock_asm_factory.NewMockClientCreator(ctrl)
 
 	credentialSpecRes, cerr := credentialspec.NewCredentialSpecResource(
 		testTask.Arn,
@@ -1498,6 +1502,7 @@ func TestCredentialSpecResourceTaskFile(t *testing.T) {
 		credentialsManager,
 		ssmClientCreator,
 		s3ClientCreator,
+		asmClientCreator,
 		nil)
 	assert.NoError(t, cerr)
 

@@ -121,7 +121,7 @@ misc/certs/ca-certificates.crt:
 	docker run "amazon/amazon-ecs-agent-cert-source:make" cat /etc/ssl/certs/ca-certificates.crt > misc/certs/ca-certificates.crt
 
 gogenerate:
-	go generate -x ./agent/...
+	PATH=$(PATH):$(shell pwd)/scripts go generate -x ./agent/... ./ecs-agent/...
 	$(MAKE) goimports
 
 gogenerate-init:
@@ -138,35 +138,44 @@ VERBOSE=-v -cover
 # provide false positives when running integ tests, so we err on the side of
 # caution. See `go help test`
 # unit tests include the coverage profile
-GOTEST=${GO_EXECUTABLE} test -count=1 ${VERBOSE}
+GOTEST=${GO_EXECUTABLE} test -count=1
 
 # -race sometimes causes compile issues on Arm
 ifneq (${BUILD_PLATFORM},aarch64)
 	GOTEST += -race
 endif
 
-test:
-	cd agent && GO111MODULE=on ${GOTEST} ${VERBOSE} -tags unit -mod vendor -coverprofile ../cover.out -timeout=60s ./... && cd ..
+test-ebs-csi:
+	make -C ./ecs-agent/daemonimages/csidriver test
+
+test: test-ebs-csi
+	cd agent && GO111MODULE=on ${GOTEST} ${VERBOSE} -tags unit -mod vendor -coverprofile ../cover.out -timeout=120s ./... && cd ..
 	go tool cover -func cover.out > coverprofile.out
+	cd ecs-agent && GO111MODULE=on ${GOTEST} ${VERBOSE} -tags unit -mod vendor -coverprofile ../cover.out -timeout=120s ./... && cd ..
+	go tool cover -func cover.out > coverprofile-ecs-agent.out
 
 test-init:
 	go test -count=1 -short -v -coverprofile cover.out ./ecs-init/...
 	go tool cover -func cover.out > coverprofile-init.out
 
-test-silent:
-	cd agent && GO111MODULE=on ${GOTEST} -tags unit -mod vendor -coverprofile ../cover.out -timeout=60s ./... && cd ..
+test-silent: test-ebs-csi
+	cd agent && GO111MODULE=on ${GOTEST} -tags unit -mod vendor -coverprofile ../cover.out -timeout=120s ./... && cd ..
 	go tool cover -func cover.out > coverprofile.out
+	cd ecs-agent && GO111MODULE=on ${GOTEST} -tags unit -mod vendor -coverprofile ../cover.out -timeout=120s ./... && cd ..
+	go tool cover -func cover.out > coverprofile-ecs-agent.out
 
 .PHONY: analyze-cover-profile
-analyze-cover-profile: coverprofile.out
-	./scripts/analyze-cover-profile
+analyze-cover-profile: coverprofile.out coverprofile-ecs-agent.out
+	./scripts/analyze-cover-profile coverprofile.out
+	./scripts/analyze-cover-profile coverprofile-ecs-agent.out
 
 .PHONY: analyze-cover-profile-init
 analyze-cover-profile-init: coverprofile-init.out
-	./scripts/analyze-cover-profile-init
+	./scripts/analyze-cover-profile coverprofile-init.out
 
-run-integ-tests: test-registry gremlin container-health-check-image run-sudo-tests
-	ECS_LOGLEVEL=debug ${GOTEST} -tags integration -timeout=30m ./agent/...
+run-integ-tests: test-registry gremlin start-ebs-csi-driver container-health-check-image run-sudo-tests
+	ECS_LOGLEVEL=debug ${GOTEST} -tags integration -timeout=30m ./agent/... ./ecs-agent/...
+	$(MAKE) stop-ebs-csi-driver
 
 run-sudo-tests:
 	sudo -E ${GOTEST} -tags sudo -timeout=10m ./agent/...
@@ -255,7 +264,7 @@ dockerfree-cni-plugins:
 release-agent-internal: dockerfree-certs dockerfree-cni-plugins static
 	./scripts/build-agent-image
 
-# Default Agent target to build. Pulls cni plugins, builds agent image and save it to disk 
+# Default Agent target to build. Pulls cni plugins, builds agent image and save it to disk
 release-agent: get-cni-sources
 	$(MAKE) release-agent-internal
 
@@ -281,13 +290,27 @@ exec-command-agent-test:
 
 	@./scripts/setup-test-registry
 
-.PHONY: fluentd gremlin image-cleanup-test-images
+.PHONY: fluentd gremlin ebs-csi-driver start-ebs-csi-driver stop-ebs-csi-driver image-cleanup-test-images
 
 gremlin:
 	$(MAKE) -C misc/gremlin $(MFLAGS)
 
 fluentd:
 	$(MAKE) -C misc/fluentd $(MFLAGS)
+
+EBS_CSI_DRIVER_DIR=./ecs-agent/daemonimages/csidriver
+
+ebs-csi-driver:
+	$(MAKE) -C $(EBS_CSI_DRIVER_DIR) $(MFLAGS) bin/ebs-csi-driver
+
+# Starts EBS CSI Driver as a background process.
+# The driver uses /tmp/ebs-csi-driver.sock as the socket file.
+start-ebs-csi-driver: ebs-csi-driver
+	$(EBS_CSI_DRIVER_DIR)/bin/ebs-csi-driver --endpoint unix:///tmp/ebs-csi-driver.sock &
+
+# Stops EBS CSI Driver process started by start-ebs-csi-driver target.
+stop-ebs-csi-driver:
+	ps aux | grep $(EBS_CSI_DRIVER_DIR)/bin/ebs-csi-driver | grep -v grep | awk '{print $$2}' | xargs -L1 kill
 
 image-cleanup-test-images:
 	$(MAKE) -C misc/image-cleanup-test-images $(MFLAGS)
@@ -296,20 +319,20 @@ container-health-check-image:
 	$(MAKE) -C misc/container-health $(MFLAGS)
 
 # all .go files in the agent, excluding vendor/, model/ and testutils/ directories, and all *_test.go and *_mocks.go files
-GOFILES:=$(shell go list -f '{{$$p := .}}{{range $$f := .GoFiles}}{{$$p.Dir}}/{{$$f}} {{end}}' ./agent/... \
+GOFILES:=$(shell go list -f '{{$$p := .}}{{range $$f := .GoFiles}}{{$$p.Dir}}/{{$$f}} {{end}}' ./agent/... ./ecs-agent/... \
 		| grep -v /testutils/ | grep -v _test\.go$ | grep -v _mocks\.go$ | grep -v /model)
 
 .PHONY: gocyclo
 gocyclo:
 	# Run gocyclo over all .go files
-	gocyclo -over 17 ${GOFILES}
+	gocyclo -over 40 ${GOFILES}
 
 # same as gofiles above, but without the `-f`
 .PHONY: govet
 govet:
-	go vet $(shell go list ./agent/... | grep -v /testutils/ | grep -v _test\.go$ | grep -v /mocks | grep -v /model)
+	go vet $(shell go list ./agent/... ./ecs-agent/... | grep -v /testutils/ | grep -v _test\.go$ | grep -v /mocks | grep -v /model)
 
-GOFMTFILES:=$(shell find ./agent -not -path './agent/vendor/*' -type f -iregex '.*\.go')
+GOFMTFILES:=$(shell find ./agent ./ecs-agent -not -path './agent/vendor/*' -not -path './ecs-agent/vendor/*' -type f -iregex '.*\.go')
 
 .PHONY: importcheck
 importcheck:
@@ -331,7 +354,7 @@ static-check: gocyclo govet importcheck gogenerate-check
 	# use default checks of staticcheck tool, except style checks (-ST*) and depracation checks (-SA1019)
 	# depracation checks have been left out for now; removing their warnings requires error handling for newer suggested APIs, changes in function signatures and their usages.
 	# https://github.com/dominikh/go-tools/tree/master/cmd/staticcheck
-	staticcheck -tests=false -checks "inherit,-ST*,-SA1019,-SA9002,-SA4006" ./agent/...
+	staticcheck -tests=false -checks "inherit,-ST*,-SA1019,-SA9002,-SA4006" ./agent/... ./ecs-agent/...
 
 .PHONY: static-check-init
 static-check-init: gocyclo govet importcheck gogenerate-check-init
@@ -349,21 +372,19 @@ install-golang:
 	./scripts/install-golang.sh
 
 .get-deps-stamp:
-	go get github.com/golang/mock/mockgen
-	cd "${GOPATH}/src/github.com/golang/mock/mockgen" && git checkout 1.3.1 && go get ./... && go install ./... && cd -
-	go get golang.org/x/tools/cmd/goimports
-	GO111MODULE=on go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.3.1
-	GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@v0.3.2
+	go install github.com/golang/mock/mockgen@v1.6.0
+	go install golang.org/x/tools/cmd/goimports@v0.2.0
+	GO111MODULE=on go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+	GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@v0.4.0
 	touch .get-deps-stamp
 
 get-deps: .get-deps-stamp
 
 get-deps-init:
-	go get github.com/golang/mock/mockgen
-	cd "${GOPATH}/src/github.com/golang/mock/mockgen" && git checkout 1.3.1 && go get ./... && go install ./... && cd -
-	GO111MODULE=on go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.3.1
-	go get golang.org/x/tools/cmd/goimports
-	GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@v0.3.2
+	go install github.com/golang/mock/mockgen@v1.6.0
+	go install golang.org/x/tools/cmd/goimports@v0.2.0
+	GO111MODULE=on go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+	GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@v0.4.0
 
 amazon-linux-sources.tgz:
 	./scripts/update-version.sh
@@ -437,6 +458,7 @@ clean:
 	-rm -rf cover.out
 	-rm -rf coverprofile.out
 	-rm -rf coverprofile-init.out
+	-rm -rf coverprofile-ecs-agent.out
 	# ecs-init & rpm cleanup
 	-rm -f ecs-init.spec
 	-rm -f amazon-ecs-init.spec
@@ -461,6 +483,7 @@ clean:
 	-rm -f .amazon-linux-rpm-integrated-done
 	-rm -f .generic-rpm-integrated-done
 	-rm -f amazon-ecs-volume-plugin
+	-rm -rf $(EBS_CSI_DRIVER_DIR)/bin
 
 clean-all: clean
 	# for our dockerfree builds, we likely don't have docker
