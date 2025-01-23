@@ -868,6 +868,7 @@ func (agent *ecsAgent) registerContainerInstance(
 			})
 			return terminalError{err}
 		}
+
 		if utils.IsAWSErrorCodeEqual(err, apierrors.ErrCodeClientException) {
 			logger.Critical("Instance registration attempt with client performing invalid action", logger.Fields{
 				field.Error: err,
