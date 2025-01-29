@@ -45,7 +45,7 @@ const (
 	// DefaultAgentVersion is the version of the agent that will be
 	// fetched if required. This should look like v1.2.3 or an
 	// 8-character sha, as is downloadable from S3.
-	DefaultAgentVersion = "v1.89.3"
+	DefaultAgentVersion = "v1.90.0"
 
 	// AgentPartitionBucketName is the name of the paritional s3 bucket that stores the agent
 	AgentPartitionBucketName = "amazon-ecs-agent"
@@ -109,6 +109,9 @@ const (
 	ECSAgentAppArmorProfileNameEnvVar  = "ECS_AGENT_APPARMOR_PROFILE"
 	ECSAgentAppArmorDefaultProfileName = "ecs-agent-default"
 )
+
+// OsStat is useful for mocking in unit tests
+var OsStat = os.Stat
 
 // partitionBucketRegion provides the "partitional" bucket region
 // suitable for downloading agent from.
@@ -256,17 +259,17 @@ func MountDirectoryEBS() string {
 	return directoryPrefix + "/mnt/ecs/ebs"
 }
 
-// HostCertsDirPath() returns the CA store path on the host
+// HostCertsDirPath returns the CA store path on the host
 func HostCertsDirPath() string {
-	if _, err := os.Stat(hostCertsDirPath); err != nil {
+	if _, err := OsStat(hostCertsDirPath); err != nil {
 		return ""
 	}
 	return hostCertsDirPath
 }
 
-// HostPKIDirPath() returns the CA store path on the host
+// HostPKIDirPath returns the CA store path on the host
 func HostPKIDirPath() string {
-	if _, err := os.Stat(hostPKIDirPath); err != nil {
+	if _, err := OsStat(hostPKIDirPath); err != nil {
 		return ""
 	}
 	return hostPKIDirPath
