@@ -28,6 +28,7 @@ import (
 	resourcestatus "github.com/aws/amazon-ecs-agent/agent/taskresource/status"
 	apicontainerstatus "github.com/aws/amazon-ecs-agent/ecs-agent/api/container/status"
 	"github.com/aws/amazon-ecs-agent/ecs-agent/api/task/status"
+	"github.com/aws/amazon-ecs-agent/ecs-agent/utils/retry"
 	"github.com/cihub/seelog"
 	"github.com/pkg/errors"
 )
@@ -363,20 +364,46 @@ func (vol *VolumeResource) SourcePath() string {
 	return vol.GetMountPoint()
 }
 
-// Create performs resource creation
+// Create performs resource creation. For EFS volumes that use the ECS volume
+// plugin, plugin timeout due to concurrent mounts are retried with backoff
+// so that the task is not marked as failed.
 func (vol *VolumeResource) Create() error {
 	seelog.Debugf("Creating volume with name %s using driver %s", vol.VolumeConfig.DockerVolumeName, vol.VolumeConfig.Driver)
-	volumeResponse := vol.client.CreateVolume(
-		vol.ctx,
-		vol.VolumeConfig.DockerVolumeName,
-		vol.VolumeConfig.Driver,
-		vol.getDriverOpts(),
-		vol.VolumeConfig.Labels,
-		dockerclient.CreateVolumeTimeout)
 
-	if volumeResponse.Error != nil {
-		vol.setTerminalReason(volumeResponse.Error.Error())
+	var volumeResponse dockerapi.SDKVolumeResponse
+	createOnce := func() error {
+		volumeResponse = vol.client.CreateVolume(
+			vol.ctx,
+			vol.VolumeConfig.DockerVolumeName,
+			vol.VolumeConfig.Driver,
+			vol.getDriverOpts(),
+			vol.VolumeConfig.Labels,
+			dockerclient.CreateVolumeTimeout)
 		return volumeResponse.Error
+	}
+
+	var err error
+	if vol.VolumeConfig.Driver == ECSVolumePlugin {
+		// The ECS volume plugin serializes mount operations behind a global lock.
+		// When multiple volumes are being mounted concurrently, Docker's 60s plugin
+		// RPC timeout can be exceeded, causing a "context deadline exceeded" error.
+		// Retrying here allows the agent to recover once the preceding mounts finish.
+		backoff := retry.NewExponentialBackoff(time.Second, 10*time.Second, 0.15, 2.0)
+		retry.RetryNWithBackoffCtx(vol.ctx, backoff, 3, func() error {
+			err = createOnce()
+			if err != nil {
+				seelog.Warnf("Volume [%s]: error creating volume, will retry: %v",
+					vol.VolumeConfig.DockerVolumeName, err)
+			}
+			return err
+		})
+	} else {
+		err = createOnce()
+	}
+
+	if err != nil {
+		vol.setTerminalReason(err.Error())
+		return err
 	}
 
 	// set readonly field after creation

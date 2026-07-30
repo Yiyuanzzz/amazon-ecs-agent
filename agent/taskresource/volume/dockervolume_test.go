@@ -367,3 +367,78 @@ func TestGetDriverOpts(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateECSVolumePluginRetrySuccess(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockClient := mock_dockerapi.NewMockDockerClient(ctrl)
+
+	name := "efsVolume"
+	scope := "task"
+	mountPoint := "/mnt/efs"
+
+	gomock.InOrder(
+		mockClient.EXPECT().CreateVolume(gomock.Any(), name, ECSVolumePlugin, gomock.Any(), nil, dockerclient.CreateVolumeTimeout).Return(
+			dockerapi.SDKVolumeResponse{
+				DockerVolume: nil,
+				Error:        errors.New("context deadline exceeded"),
+			}),
+		mockClient.EXPECT().CreateVolume(gomock.Any(), name, ECSVolumePlugin, gomock.Any(), nil, dockerclient.CreateVolumeTimeout).Return(
+			dockerapi.SDKVolumeResponse{
+				DockerVolume: &volume.Volume{Name: name, Mountpoint: mountPoint},
+				Error:        nil,
+			}),
+	)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	vol, _ := NewVolumeResource(ctx, name, "efs", name, scope, false, ECSVolumePlugin, map[string]string{"o": "iam"}, nil, mockClient)
+	err := vol.Create()
+	assert.NoError(t, err)
+	assert.Equal(t, name, vol.VolumeConfig.Mountpoint)
+}
+
+func TestCreateECSVolumePluginExhaustsRetries(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockClient := mock_dockerapi.NewMockDockerClient(ctrl)
+
+	name := "efsVolume"
+	scope := "task"
+
+	mockClient.EXPECT().CreateVolume(gomock.Any(), name, ECSVolumePlugin, gomock.Any(), nil, dockerclient.CreateVolumeTimeout).Return(
+		dockerapi.SDKVolumeResponse{
+			DockerVolume: nil,
+			Error:        errors.New("some plugin error"),
+		}).Times(3)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	vol, _ := NewVolumeResource(ctx, name, "efs", name, scope, false, ECSVolumePlugin, map[string]string{"o": "iam"}, nil, mockClient)
+	err := vol.Create()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "some plugin error")
+}
+
+func TestCreateNonECSPluginNoRetry(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	mockClient := mock_dockerapi.NewMockDockerClient(ctrl)
+
+	name := "regularVolume"
+	scope := "shared"
+	driver := "local"
+
+	mockClient.EXPECT().CreateVolume(gomock.Any(), name, driver, gomock.Any(), nil, dockerclient.CreateVolumeTimeout).Return(
+		dockerapi.SDKVolumeResponse{
+			DockerVolume: nil,
+			Error:        errors.New("some error"),
+		}).Times(1)
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	defer cancel()
+	vol, _ := NewVolumeResource(ctx, name, "docker", name, scope, true, driver, map[string]string{}, nil, mockClient)
+	err := vol.Create()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "some error")
+}
